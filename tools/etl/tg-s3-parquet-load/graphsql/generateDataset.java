@@ -35,16 +35,18 @@ public class generateDataset implements Serializable {
   static String awsAccessKey;
   static String awsSecretKey;
   static String bucket_name;
+  static String tg_token;
   static Boolean readFileOnly = false;
 
   static String[] schema_folders;
-  
+
   private static Logger logger;
 
   public static void main(String[] args) {
     String properties_file = "";
     String target_host = "";
     String target_path = "";
+
     int times = 1;
 
     if (args.length < 3) {
@@ -59,7 +61,7 @@ public class generateDataset implements Serializable {
     if (args.length > 3) {
       times = Integer.parseInt(args[3]);
     }
-    
+
     String loggerFolder = "/tmp/sparkLoader";
     if (args.length > 4) {
       loggerFolder = args[4];
@@ -89,10 +91,15 @@ public class generateDataset implements Serializable {
       awsSecretKey = prop.getProperty("awsSecretKey");
       bucket_name = prop.getProperty("bucket_name");
       schema_folders = prop.getProperty("schema_folders").split(",");
+      tg_token = prop.getProperty("tg_token");
 
       String rest_endpoint = prop.getProperty("rest_endpoint");
 
-      new generateDataset().run(target_host, target_path, rest_endpoint, times);
+      //create the token
+      String bearer = "Bearer ";
+      String final_token = bearer + tg_token;
+
+      new generateDataset().run(target_host, target_path, rest_endpoint, times, final_token);
     } catch (IOException ex) {
       ex.printStackTrace();
     }
@@ -105,19 +112,19 @@ public class generateDataset implements Serializable {
   }
 
   private static void logInfo(String msg, Boolean tee2Std) {
-     logMsg(msg, Level.INFO, tee2Std);
+    logMsg(msg, Level.INFO, tee2Std);
   }
 
   private static void logInfo(String msg) {
-     logInfo(msg, false);
+    logInfo(msg, false);
   }
 
   private static void logWarning(String msg) {
-     logMsg(msg, Level.WARNING, false);
+    logMsg(msg, Level.WARNING, false);
   }
 
 
-  public void run(String target_host, String target_path, String rest_endpoint, int times) {
+  public void run(String target_host, String target_path, String rest_endpoint, int times, String tg_token) {
     // create spark context and spark sql instance
     SparkSession sc = SparkSession.builder().appName("Uber").getOrCreate();
     sc.conf().set("fs.s3a.attempts.maximum", "30");
@@ -142,7 +149,7 @@ public class generateDataset implements Serializable {
     logInfo("Start process", true);
     for (String schema_folder : schema_folders) {
       logInfo("Start to load schema folder " + schema_folder, true);
-      post2Tg(s3client, sc, schema_folder, target_host, target_path, rest_endpoint, times);
+      post2Tg(s3client, sc, schema_folder, target_host, target_path, rest_endpoint, times, tg_token);
       logInfo("Loding schema folder " + schema_folder + " successfully", true);
     }
     logInfo("End process", true);
@@ -159,11 +166,11 @@ public class generateDataset implements Serializable {
   */
 
   private void post2Tg(AmazonS3Client s3client, SparkSession sc, String schema_folder,
-      String target_host, String target_path, String rest_endpoint, int times) {
+                       String target_host, String target_path, String rest_endpoint, int times, String tg_token) {
 
     // get date folder. folder is named by datetime, like 20160402_20171029_20171102T170615.937Z
     ListObjectsRequest listFolders = new ListObjectsRequest()
-        .withBucketName(bucket_name).withPrefix(schema_folder + "/").withDelimiter("/");
+            .withBucketName(bucket_name).withPrefix(schema_folder + "/").withDelimiter("/");
     ObjectListing foldersListing;
     do {
       foldersListing = s3client.listObjects(listFolders);
@@ -177,64 +184,64 @@ public class generateDataset implements Serializable {
         }
       }
       for (String folder_path : folder_path_arr) {
-          logInfo("Start to load date folder " + folder_path, true);
+        logInfo("Start to load date folder " + folder_path, true);
 
-          // collect all parquet file paths
-          List<String> s3Paths = new ArrayList<String>();
+        // collect all parquet file paths
+        List<String> s3Paths = new ArrayList<String>();
 
-          // get all parquet files in the date folder and add to s3Paths
-          ListObjectsRequest listObjectRequest = new ListObjectsRequest()
-              .withBucketName(bucket_name).withPrefix(folder_path);
-          ObjectListing objectListing;
-          do {
-            objectListing = s3client.listObjects(listObjectRequest);
-            for (S3ObjectSummary s3Object : objectListing.getObjectSummaries()) {
-              if (s3Object.getKey().endsWith(".parquet")) {
-                String absoluteS3Path = bucket_name + S3FileSeparator + s3Object.getKey();
-                s3Paths.add(S3Prefix + absoluteS3Path);
-                logInfo("file " + absoluteS3Path);
-              }
+        // get all parquet files in the date folder and add to s3Paths
+        ListObjectsRequest listObjectRequest = new ListObjectsRequest()
+                .withBucketName(bucket_name).withPrefix(folder_path);
+        ObjectListing objectListing;
+        do {
+          objectListing = s3client.listObjects(listObjectRequest);
+          for (S3ObjectSummary s3Object : objectListing.getObjectSummaries()) {
+            if (s3Object.getKey().endsWith(".parquet")) {
+              String absoluteS3Path = bucket_name + S3FileSeparator + s3Object.getKey();
+              s3Paths.add(S3Prefix + absoluteS3Path);
+              logInfo("file " + absoluteS3Path);
             }
-            // continue geting parquet files from last fetching marker
-            listObjectRequest.setMarker(objectListing.getNextMarker());
-          } while (objectListing.isTruncated() == true);
-
-          if (s3Paths.size() == 0) {
-            System.out.println("Error ! No file found");
-            System.exit(1);
           }
-          // If it is local, write to csv. If it is schema, print schema only. If it is IP address, do post to TG.
-          if (target_host.equals("schema")) {
-            Dataset<Row> parquet_data = sc.read().parquet(s3Paths.get(0));
-            long count = parquet_data.count();
-            logInfo("xxxxxxxxxxxxxxxxx count is " + count + " xxxxxxxxxxxxxxxxx");
-            logInfo("xxxxxxxxxxxxxxxxx schema xxxxxxxxxxxxxxxxx");
-            parquet_data.printSchema();
-            logInfo("xxxxxxxxxxxxxxxxx schema xxxxxxxxxxxxxxxxx");
+          // continue geting parquet files from last fetching marker
+          listObjectRequest.setMarker(objectListing.getNextMarker());
+        } while (objectListing.isTruncated() == true);
+
+        if (s3Paths.size() == 0) {
+          System.out.println("Error ! No file found");
+          System.exit(1);
+        }
+        // If it is local, write to csv. If it is schema, print schema only. If it is IP address, do post to TG.
+        if (target_host.equals("schema")) {
+          Dataset<Row> parquet_data = sc.read().parquet(s3Paths.get(0));
+          long count = parquet_data.count();
+          logInfo("xxxxxxxxxxxxxxxxx count is " + count + " xxxxxxxxxxxxxxxxx");
+          logInfo("xxxxxxxxxxxxxxxxx schema xxxxxxxxxxxxxxxxx");
+          parquet_data.printSchema();
+          logInfo("xxxxxxxxxxxxxxxxx schema xxxxxxxxxxxxxxxxx");
+        } else {
+          // parallel read those files
+          Dataset<Row> parquet_data = sc.read().parquet(JavaConversions.asScalaBuffer(s3Paths));
+          for (int i = 1; i < times; i++) {
+            Dataset<Row> tmp_data = sc.read().parquet(JavaConversions.asScalaBuffer(s3Paths));
+            tmp_data.withColumn("id", functions.lit("times_" + times + "_" + tmp_data.col("id").toString()));
+            parquet_data = parquet_data.union(tmp_data);
+          }
+          long count = parquet_data.count();
+          logInfo("xxxxxxxxxxxxxxxxx count is " + count + " xxxxxxxxxxxxxxxxx");
+          logInfo("xxxxxxxxxxxxxxxxx schema xxxxxxxxxxxxxxxxx");
+          parquet_data.printSchema();
+          logInfo("xxxxxxxxxxxxxxxxx schema xxxxxxxxxxxxxxxxx");
+
+          if (target_host.equals("local")) {
+            String localFolder = localPrefix + target_path + "/" + folder_path;
+            logInfo("write data to local " + localFolder);
+            parquet_data.write().format("csv").mode(SaveMode.Overwrite).save(localFolder);
           } else {
-            // parallel read those files
-            Dataset<Row> parquet_data = sc.read().parquet(JavaConversions.asScalaBuffer(s3Paths));
-            for (int i = 1; i < times; i++) {
-              Dataset<Row> tmp_data = sc.read().parquet(JavaConversions.asScalaBuffer(s3Paths));
-              tmp_data.withColumn("id", functions.lit("times_" + times + "_" + tmp_data.col("id").toString()));
-              parquet_data = parquet_data.union(tmp_data);
-            }
-            long count = parquet_data.count();
-            logInfo("xxxxxxxxxxxxxxxxx count is " + count + " xxxxxxxxxxxxxxxxx");
-            logInfo("xxxxxxxxxxxxxxxxx schema xxxxxxxxxxxxxxxxx");
-            parquet_data.printSchema();
-            logInfo("xxxxxxxxxxxxxxxxx schema xxxxxxxxxxxxxxxxx");
-
-            if (target_host.equals("local")) {
-              String localFolder = localPrefix + target_path + "/" + folder_path;
-              logInfo("write data to local " + localFolder);
-              parquet_data.write().format("csv").mode(SaveMode.Overwrite).save(localFolder);
-            } else {
-              logInfo("send data to restpp endpoint " + rest_endpoint);
-              processHiveData(target_host, rest_endpoint, parquet_data);
-            }
+            logInfo("send data to restpp endpoint " + rest_endpoint);
+            processHiveData(target_host, rest_endpoint, parquet_data, tg_token);
           }
-          logInfo("Load date folder " + folder_path + " successfully", true);
+        }
+        logInfo("Load date folder " + folder_path + " successfully", true);
       }
       // continue geting date folder name from last fetching marker
       listFolders.setMarker(foldersListing.getNextMarker());
@@ -251,7 +258,7 @@ public class generateDataset implements Serializable {
   }
 
 
-  private void processHiveData(String target_host, String rest_endpoint, final Dataset<Row> hiveData) {
+  private void processHiveData(String target_host, String rest_endpoint, final Dataset<Row> hiveData, String tg_token) {
     hiveData.foreachPartition(rowIterator -> {
       int rowCount = 0;
       StringBuilder payload = new StringBuilder("");
@@ -259,25 +266,25 @@ public class generateDataset implements Serializable {
         Row row = rowIterator.next();
         rowCount++;
         for (int i = 0; i < row.length(); i++){
-            payload.append(Objects.toString(row.get(i), "") + (i == row.length() - 1 ? "\n" : ","));
+          payload.append(Objects.toString(row.get(i), "") + (i == row.length() - 1 ? "\n" : ","));
         }
 
         if (rowCount == 5000){
-          batchPost(target_host, rest_endpoint, payload);
+          batchPost(target_host, rest_endpoint, payload, tg_token);
           rowCount = 0;
         }
       }
       //handle case for the last batch
       if (rowCount > 0){
-        batchPost(target_host, rest_endpoint, payload);
+        batchPost(target_host, rest_endpoint, payload, tg_token);
       }
     });
   }
 
-  public void batchPost(String target_host, String rest_endpoint, StringBuilder payload) {
+  public void batchPost(String target_host, String rest_endpoint, StringBuilder payload, String tg_token) {
     // String requestUrl = "http://" + host + ":9000/dumpfile?filename=/tmp/data.csv";
     String requestUrl = target_host + "/ddl?sep=,&tag=" + rest_endpoint + "&eol=%0A";
-    String response = sendPostRequest(requestUrl, payload.toString());
+    String response = sendPostRequest(requestUrl, tg_token, payload.toString());
     JSONObject res_json;
     try {
       res_json = new JSONObject(response);
@@ -287,12 +294,12 @@ public class generateDataset implements Serializable {
         logInfo("Response: " + response);
       }
     } catch (JSONException e) {
-       e.printStackTrace();
+      e.printStackTrace();
     }
     payload.setLength(0);
   }
 
-  public static String sendPostRequest(String requestUrl, String payload) {
+  public static String sendPostRequest(String requestUrl, String tg_token, String payload) {
     StringBuffer sb = new StringBuffer();
     try {
       URL url = new URL(requestUrl);
@@ -302,6 +309,7 @@ public class generateDataset implements Serializable {
       connection.setDoOutput(true);
       connection.setRequestMethod("POST");
       connection.setRequestProperty("Accept", "application/json");
+      connection.setRequestProperty("Authorization", tg_token);
       connection.setRequestProperty("Content-Type", "application/json; charset = UTF-8");
       OutputStreamWriter writer = new OutputStreamWriter(connection.getOutputStream(), "UTF-8");
       writer.write(payload);
